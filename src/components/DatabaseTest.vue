@@ -3,6 +3,7 @@ import { defineComponent, ref } from 'vue'
 import PouchDB from 'pouchdb'
 
 // The polyfill that was here has been REMOVED.
+//hello
 
 // Define the type for documents in your database
 interface CouchDoc {
