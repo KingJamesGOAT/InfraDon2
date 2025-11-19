@@ -1,515 +1,490 @@
 <script lang="ts">
 import { defineComponent } from 'vue'
 import PouchDB from 'pouchdb'
+import PouchDBFind from 'pouchdb-find'
 
+// Register the find plugin
+PouchDB.plugin(PouchDBFind)
+
+// Document Interface
 type InfraDoc = {
   _id?: string
   _rev?: string
   name: string
   content: string
+  category: string
   created_at: string
 }
 
-// 1. CORRECTED: Using your username, password, and database name
-const COUCH_URL = 'http://steve:Goldy_2002_2002@127.0.0.1:5984/infra_53_0850'
-
-// Types simples pour satisfaire TS
-type PouchPostResponse = {
-  ok: boolean
-  id: string
-  rev: string
-}
-
-type PouchPutResponse = {
-  ok: boolean
-  id: string
-  rev: string
-}
-
-type PouchRemoveResponse = {
-  ok: boolean
-  id: string
-  rev: string
-}
-
-type PouchAllDocsRow<T> = {
-  id: string
-  key: string
-  value: {
-    rev: string
-    deleted?: boolean
-  }
-  doc?: T
-}
-
-type PouchAllDocsResult<T> = {
-  total_rows: number
-  offset: number
-  rows: Array<PouchAllDocsRow<T>>
-}
+// Configuration
+const REMOTE_DB_URL = 'http://steve:Goldy_2002_2002@127.0.0.1:5984/infra_53_0850'
+const LOCAL_DB_NAME = 'infra_local_db'
 
 export default defineComponent({
   name: 'InfraCrud',
 
   data() {
     return {
-      db: null as null | PouchDB.Database<InfraDoc>,
-      loading: false as boolean,
-      error: '' as string,
+      localDB: null as null | PouchDB.Database<InfraDoc>,
+      remoteDB: null as null | PouchDB.Database<InfraDoc>,
+
+      syncHandler: null as null | PouchDB.Replication.Sync<InfraDoc>,
+
+      isOffline: true,
+      syncStatus: 'Offline',
 
       docs: [] as InfraDoc[],
+      loading: false,
+      error: '',
+      searchQuery: '',
 
       form: {
         _id: '',
         _rev: '',
         name: '',
         content: '',
-      } as { _id: string; _rev: string; name: string; content: string },
-
-      isEdit: false as boolean,
+        category: 'General',
+      } as InfraDoc,
+      isEdit: false,
     }
   },
 
   methods: {
-    // 1. Connexion PouchDB -> CouchDB
-    initDatabase(): PouchDB.Database<InfraDoc> {
-      if (!this.db) {
-        this.db = new PouchDB<InfraDoc>(COUCH_URL)
-      }
-      return this.db
+    // --- INITIALIZATION ---
+    initDatabases() {
+      this.localDB = new PouchDB<InfraDoc>(LOCAL_DB_NAME)
+      this.remoteDB = new PouchDB<InfraDoc>(REMOTE_DB_URL)
+      this.createIndex()
     },
 
-    // 2. READ: récupérer tous les documents
-    async fetchData(): Promise<void> {
+    async createIndex() {
+      if (!this.localDB) return
+      try {
+        await this.localDB.createIndex({ index: { fields: ['name'] } })
+      } catch (err) {
+        console.error('Index creation failed:', err)
+      }
+    },
+
+    // --- CRUD & SEARCH ---
+    async fetchData() {
+      if (!this.localDB) return
       this.loading = true
       this.error = ''
-      try {
-        const db = this.initDatabase()
-        const result: PouchAllDocsResult<InfraDoc> = await db.allDocs({
-          include_docs: true,
-        })
 
-        this.docs = result.rows.filter((r) => r.doc !== undefined).map((r) => r.doc as InfraDoc)
+      try {
+        let resultDocs: InfraDoc[] = []
+
+        if (this.searchQuery && this.searchQuery.length > 0) {
+          const result = await this.localDB.find({
+            selector: { name: { $regex: new RegExp(this.searchQuery, 'i') } },
+          })
+          resultDocs = result.docs as InfraDoc[]
+        } else {
+          const result = await this.localDB.allDocs({ include_docs: true, descending: true })
+          resultDocs = result.rows.map((row) => row.doc as InfraDoc)
+        }
+
+        this.docs = resultDocs
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erreur inconnue dans fetchData'
-        this.error = 'Erreur fetchData: ' + msg
-        console.error('fetchData error:', err)
+        this.error = 'Error fetching data: ' + (err as Error).message
       } finally {
         this.loading = false
       }
     },
 
-    // 3. CREATE: créer un doc à partir du formulaire
-    async createData(): Promise<void> {
-      this.loading = true
-      this.error = ''
+    async createData() {
+      if (!this.localDB) return
       try {
-        const db = this.initDatabase()
-
-        const newDoc: InfraDoc = {
-          name: this.form.name,
-          content: this.form.content,
-          created_at: new Date().toISOString(),
-        }
-
-        const res: PouchPostResponse = await db.post(newDoc)
-        console.log('createData ok:', res)
-
-        await this.fetchData() // Refresh list
+        const newDoc: InfraDoc = { ...this.form, created_at: new Date().toISOString() }
+        await this.localDB.post(newDoc)
         this.resetForm()
+        await this.fetchData()
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erreur inconnue dans createData'
-        this.error = 'Erreur createData: ' + msg
-        console.error('createData error:', err)
-      } finally {
-        this.loading = false
+        this.error = 'Create error: ' + (err as Error).message
       }
     },
 
-    // passe en mode édition
-    startEdit(doc: InfraDoc): void {
-      this.isEdit = true
-      this.form._id = doc._id ?? ''
-      this.form._rev = doc._rev ?? ''
-      this.form.name = doc.name
-      this.form.content = doc.content
-    },
-
-    // 4. UPDATE: sauvegarder les modifs
-    async updateData(): Promise<void> {
-      this.loading = true
-      this.error = ''
+    async updateData() {
+      if (!this.localDB || !this.form._id || !this.form._rev) return
       try {
-        const db = this.initDatabase()
-
-        if (!this.form._id || !this.form._rev) {
-          throw new Error('Pas _id / _rev')
-        }
-
-        // 2. CORRECTED: Find the original doc to preserve the created_at date
         const originalDoc = this.docs.find((doc) => doc._id === this.form._id)
-        const createdAt = originalDoc ? originalDoc.created_at : new Date().toISOString() // Fallback just in case
-
-        const updatedDoc: InfraDoc = {
-          _id: this.form._id,
-          _rev: this.form._rev,
-          name: this.form.name,
-          content: this.form.content,
-          created_at: createdAt, // Use the original created_at date
-        }
-
-        const res: PouchPutResponse = await db.put(updatedDoc)
-        console.log('updateData ok:', res)
-
-        await this.fetchData() // Refresh list
+        const createdAt = originalDoc ? originalDoc.created_at : new Date().toISOString()
+        const updatedDoc: InfraDoc = { ...this.form, created_at: createdAt }
+        await this.localDB.put(updatedDoc)
         this.resetForm()
+        await this.fetchData()
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erreur inconnue dans updateData'
-        this.error = 'Erreur updateData: ' + msg
-        console.error('updateData error:', err)
-      } finally {
-        this.loading = false
+        this.error = 'Update error: ' + (err as Error).message
       }
     },
 
-    // 5. DELETE
-    async deleteData(id: string, rev: string): Promise<void> {
-      this.loading = true
-      this.error = ''
+    async deleteData(doc: InfraDoc) {
+      if (!this.localDB || !doc._id || !doc._rev) return
       try {
-        // 3. CORRECTED: Add check for id and rev
-        if (!id || !rev) {
-          throw new Error('ID or revision is missing, cannot delete.')
-        }
-
-        const db = this.initDatabase()
-
-        const res: PouchRemoveResponse = await db.remove(id, rev)
-        console.log('deleteData ok:', res)
-
-        await this.fetchData() // Refresh list
-
-        if (this.form._id === id) {
-          this.resetForm()
-        }
+        await this.localDB.remove(doc._id, doc._rev)
+        await this.fetchData()
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erreur inconnue dans deleteData'
-        this.error = 'Erreur deleteData: ' + msg
-        console.error('deleteData error:', err)
-      } finally {
-        this.loading = false
+        this.error = 'Delete error: ' + (err as Error).message
       }
     },
 
-    // reset du formulaire (repasse en mode création)
-    resetForm(): void {
-      this.isEdit = false
-      this.form = {
-        _id: '',
-        _rev: '',
-        name: '',
-        content: '',
-      }
-    },
-
-    // bouton principal du form
-    async submitForm(): Promise<void> {
-      if (this.isEdit) {
-        await this.updateData()
+    // --- REPLICATION ---
+    toggleSync() {
+      if (this.isOffline) {
+        this.startSync()
       } else {
-        await this.createData()
+        this.stopSync()
       }
+    },
+
+    startSync() {
+      if (!this.localDB || !this.remoteDB) return
+
+      this.isOffline = false
+      this.syncStatus = 'Syncing...'
+
+      this.syncHandler = PouchDB.sync(this.localDB, this.remoteDB, { live: true, retry: true })
+        .on('change', () => {
+          this.fetchData()
+        })
+        .on('paused', () => {
+          this.syncStatus = 'Sync Active (Waiting)'
+        })
+        .on('active', () => {
+          this.syncStatus = 'Syncing...'
+        })
+        .on('error', (err) => {
+          this.syncStatus = 'Sync Error'
+          this.error = 'Sync Error: ' + (err as Error).message
+        })
+    },
+
+    stopSync() {
+      if (this.syncHandler) {
+        this.syncHandler.cancel()
+        this.syncHandler = null
+      }
+      this.isOffline = true
+      this.syncStatus = 'Offline'
+    },
+
+    // --- FACTORY ---
+    async generateFakeData() {
+      if (!this.localDB) return
+      const fakeDocs: InfraDoc[] = []
+      const categories = ['Work', 'Personal', 'Urgent', 'General']
+
+      for (let i = 0; i < 5; i++) {
+        fakeDocs.push({
+          name: `Fake User ${Math.floor(Math.random() * 1000)}`,
+          content: `Generated content for category: ${categories[i % 4]}`,
+          category: categories[i % 4],
+          created_at: new Date().toISOString(),
+        })
+      }
+
+      try {
+        await this.localDB.bulkDocs(fakeDocs)
+        await this.fetchData()
+      } catch (err) {
+        this.error = 'Factory error: ' + (err as Error).message
+      }
+    },
+
+    startEdit(doc: InfraDoc) {
+      this.isEdit = true
+      this.form = { ...doc }
+    },
+    resetForm() {
+      this.isEdit = false
+      this.form = { _id: '', _rev: '', name: '', content: '', category: 'General', created_at: '' }
+    },
+    async submitForm() {
+      await (this.isEdit ? this.updateData() : this.createData())
     },
   },
 
-  async mounted() {
-    this.initDatabase()
-    await this.fetchData()
+  mounted() {
+    this.initDatabases()
+    this.fetchData()
+  },
+
+  unmounted() {
+    if (this.syncHandler) {
+      this.syncHandler.cancel()
+    }
   },
 })
 </script>
 
 <template>
-  <main class="screen">
-    <section class="container">
-      <h1 class="page-title">Infra CRUD test</h1>
-
-      <div class="status">
-        <p v-if="loading" class="info">Chargement</p>
-        <p v-if="error" class="error">{{ error }}</p>
+  <div class="container">
+    <header>
+      <h1 class="page-title">Travaux Pratiques - CouchDB</h1>
+      <div class="sync-controls">
+        <div class="status-indicator">
+          Status: <span :class="isOffline ? 'red' : 'green'">{{ syncStatus }}</span>
+        </div>
+        <button @click="toggleSync" class="btn" :class="isOffline ? 'btn-success' : 'btn-warning'">
+          {{ isOffline ? 'Go Online (Start Sync)' : 'Go Offline (Stop Sync)' }}
+        </button>
       </div>
+    </header>
 
-      <!-- FORMULAIRE -->
-      <form class="card form" @submit.prevent="submitForm">
-        <h2 class="card-title">
-          {{ isEdit ? 'Modifier le document' : 'Nouveau document' }}
-        </h2>
+    <div v-if="error" class="error-msg">{{ error }}</div>
 
-        <div class="field">
-          <label for="name">Nom</label>
-          <input id="name" type="text" v-model="form.name" required placeholder="Nom du document" />
-        </div>
-
-        <div class="field">
-          <label for="content">Contenu</label>
-          <textarea
-            id="content"
-            v-model="form.content"
-            required
-            placeholder="Contenu du document"
-            rows="4"
-          ></textarea>
-        </div>
-
-        <div class="buttons-row">
-          <button type="submit" class="btn primary">
-            {{ isEdit ? 'Enregistrer' : 'Créer' }}
-          </button>
-
-          <button type="button" v-if="isEdit" class="btn secondary" @click="resetForm">
-            Annuler
+    <div class="content-grid">
+      <div class="column">
+        <div class="card factory-card">
+          <h3>Outils de Démonstration</h3>
+          <button @click="generateFakeData" class="btn btn-secondary full-width">
+            Créer 5 Documents de Démo
           </button>
         </div>
 
-        <div v-if="isEdit" class="meta">
-          <p>
-            <strong>ID:</strong>
-            {{ form._id }}
-          </p>
-          <p>
-            <strong>rev:</strong>
-            {{ form._rev }}
-          </p>
-        </div>
-      </form>
-
-      <!-- LISTE DES DOCS -->
-      <section class="card list">
-        <h2 class="card-title">Documents en base</h2>
-
-        <p v-if="docs.length === 0" class="empty">Aucun document.</p>
-
-        <ul v-else class="doc-list">
-          <li v-for="doc in docs" :key="doc._id" class="doc-item">
-            <div class="doc-main">
-              <p class="doc-name">
-                <strong>{{ doc.name }}</strong>
-              </p>
-              <p class="doc-content">{{ doc.content }}</p>
-              <p class="doc-meta">
-                <small>
-                  <strong>ID:</strong>
-                  {{ doc._id }}
-                </small>
-                <br />
-                <small>
-                  <strong>rev:</strong>
-                  {{ doc._rev }}
-                </small>
-                <br />
-                <small>
-                  <strong>created_at:</strong>
-                  {{ doc.created_at }}
-                </small>
-              </p>
+        <div class="card form-card">
+          <h3>{{ isEdit ? 'Modifier Document' : 'Nouveau Document' }}</h3>
+          <form @submit.prevent="submitForm">
+            <div class="form-group">
+              <label>Nom</label><input v-model="form.name" required placeholder="Nom du document" />
             </div>
-
-            <div class="doc-actions">
-              <button type="button" class="btn small primary" @click="startEdit(doc)">Edit</button>
-
-              <button
-                type="button"
-                class="btn small danger"
-                @click="deleteData(doc._id || '', doc._rev || '')"
-              >
-                Delete
+            <div class="form-group">
+              <label>Catégorie</label
+              ><select v-model="form.category">
+                <option>General</option>
+                <option>Work</option>
+                <option>Personal</option>
+                <option>Urgent</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Contenu</label><textarea v-model="form.content" required rows="3"></textarea>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">
+                {{ isEdit ? 'Enregistrer' : 'Créer' }}</button
+              ><button type="button" v-if="isEdit" @click="resetForm" class="btn btn-text">
+                Annuler
               </button>
             </div>
-          </li>
-        </ul>
-      </section>
-    </section>
-  </main>
+          </form>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="search-bar">
+          <input
+            v-model="searchQuery"
+            @input="fetchData"
+            placeholder="🔍 Recherche par Nom (utilise Index)..."
+          />
+        </div>
+        <div class="doc-list">
+          <div v-if="docs.length === 0 && !loading" class="empty-state">Aucun document trouvé.</div>
+          <div v-for="doc in docs" :key="doc._id" class="doc-card">
+            <div class="doc-header">
+              <h4>{{ doc.name }}</h4>
+              <span class="badge">{{ doc.category }}</span>
+            </div>
+            <p>{{ doc.content }}</p>
+            <div class="doc-footer">
+              <small>ID: {{ doc._id }}</small>
+              <div class="actions">
+                <button @click="startEdit(doc)" class="btn-icon">✏️</button
+                ><button @click="deleteData(doc)" class="btn-icon delete">🗑️</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.screen {
-  min-height: 100vh;
-  background-color: #1a1a1a;
-  color: #f5f5f5;
-  display: flex;
-  justify-content: center;
-  padding: 2rem;
+* {
   box-sizing: border-box;
 }
-
 .container {
-  width: 100%;
-  max-width: 600px;
-  display: grid;
-  gap: 2rem;
+  max-width: 1000px;
+  margin: 0 auto;
+  font-family: 'Inter', sans-serif;
+  color: #2c3e50;
+  padding: 20px;
 }
-
 .page-title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: #f5f5f5;
-  text-align: center;
   margin: 0;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: #2c3e50;
 }
-
-.status .info {
-  color: #a0a0ff;
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  border-bottom: 2px solid #ecf0f1;
+  padding-bottom: 20px;
+}
+.sync-controls {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+.status-indicator {
   font-size: 0.9rem;
-  margin: 0;
-  text-align: center;
-}
-.status .error {
-  color: #ff4a4a;
-  font-size: 0.9rem;
   font-weight: 600;
-  margin: 0;
-  text-align: center;
 }
-
+.green {
+  color: #27ae60;
+}
+.red {
+  color: #c0392b;
+}
+.error-msg {
+  background: #fbe6e6;
+  color: #c0392b;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  border: 1px solid #f09b9b;
+  font-weight: 500;
+}
+.content-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 30px;
+}
 .card {
-  background: #2a2a2a;
-  border: 1px solid #3a3a3a;
-  border-radius: 10px;
-  padding: 1.25rem 1.5rem;
+  background: #f9f9f9;
+  padding: 20px;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+  margin-bottom: 20px;
+  border: 1px solid #eee;
+}
+.form-group {
+  margin-bottom: 15px;
+}
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: #7f8c8d;
+}
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
   box-sizing: border-box;
 }
-.card-title {
-  margin: 0 0 1rem;
-  font-size: 1.1rem;
-  color: #fff;
-  font-weight: 500;
+input:focus,
+textarea:focus {
+  outline: 2px solid #3498db;
+  border-color: transparent;
 }
-
-.form .field {
+.form-actions {
   display: flex;
-  flex-direction: column;
-  margin-bottom: 1rem;
-}
-.form label {
-  font-size: 0.9rem;
-  color: #d0d0d0;
-  margin-bottom: 0.4rem;
-  font-weight: 500;
-}
-.form input,
-.form textarea {
-  width: 100%;
-  border: 1px solid #555;
-  background: #1f1f1f;
-  color: #fff;
-  border-radius: 6px;
-  padding: 0.6rem 0.75rem;
-  font-size: 1rem;
-  line-height: 1.4;
-  outline: none;
-}
-.form input:focus,
-.form textarea:focus {
-  border-color: #888;
-}
-
-.buttons-row {
-  display: flex;
-  gap: 0.75rem;
-  margin-top: 0.5rem;
-  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 20px;
 }
 .btn {
-  border: 0;
+  padding: 10px 20px;
+  border: none;
   border-radius: 6px;
-  padding: 0.6rem 1rem;
-  font-size: 0.95rem;
   cursor: pointer;
-  line-height: 1.2;
-  color: #fff;
-  white-space: nowrap;
+  font-weight: 600;
+  transition: background 0.1s;
 }
-.btn.primary {
-  background: #3a3a3a;
+.btn-primary {
+  background: #3498db;
+  color: white;
 }
-.btn.primary:hover {
-  background: #4a4a4a;
+.btn-primary:hover {
+  background: #2980b9;
 }
-.btn.secondary {
-  background: #555;
+.btn-secondary {
+  background: #95a5a6;
+  color: white;
 }
-.btn.secondary:hover {
-  background: #666;
+.btn-secondary:hover {
+  background: #7f8c8d;
 }
-.btn.danger {
-  background: #8a1a1a;
+.btn-success {
+  background: #2ecc71;
+  color: white;
 }
-.btn.danger:hover {
-  background: #a52222;
+.btn-success:hover {
+  background: #27ae60;
 }
-.btn.small {
-  font-size: 0.8rem;
-  padding: 0.4rem 0.6rem;
+.btn-warning {
+  background: #f39c12;
+  color: white;
 }
-
-.meta {
-  margin-top: 1rem;
-  font-size: 0.75rem;
-  color: #aaa;
-  background: #1f1f1f;
-  border: 1px solid #444;
-  border-radius: 6px;
-  padding: 0.75rem;
-  word-break: break-all;
+.btn-warning:hover {
+  background: #e67e22;
 }
-
-.list .empty {
-  font-size: 0.9rem;
-  color: #cfcfcf;
-  margin: 0;
+.btn-text {
+  background: none;
+  color: #7f8c8d;
 }
-
-.doc-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
+.full-width {
+  width: 100%;
 }
-.doc-item {
-  border-top: 1px solid #3a3a3a;
-  padding: 1rem 0;
+.search-bar {
+  margin-bottom: 20px;
+}
+.search-bar input {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid #ddd;
+  background: #f9f9f9;
+}
+.doc-card {
+  background: white;
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 15px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+}
+.doc-header {
   display: flex;
-  flex-direction: row;
   justify-content: space-between;
-  gap: 1rem;
+  align-items: center;
 }
-.doc-item:first-child {
-  border-top: 0;
+.doc-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
 }
-.doc-main {
-  flex: 1;
-  min-width: 0;
-  word-break: break-word;
+.badge {
+  background: #ecf0f1;
+  color: #7f8c8d;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
 }
-.doc-name {
-  margin: 0 0 0.4rem;
-  font-size: 1rem;
-  color: #fff;
-}
-.doc-content {
-  margin: 0 0 0.5rem;
-  color: #ddd;
-  font-size: 0.9rem;
-  line-height: 1.4;
-}
-.doc-meta {
-  font-size: 0.7rem;
-  color: #888;
-  line-height: 1.4;
-}
-.doc-actions {
+.doc-footer {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  border-top: 1px solid #eee;
+  padding-top: 10px;
+}
+.doc-footer small {
+  color: #bdc3c7;
+  font-size: 0.75rem;
+}
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
 }
 </style>
