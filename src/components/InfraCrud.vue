@@ -30,7 +30,7 @@ export default defineComponent({
       localDB: null as null | PouchDB.Database<InfraDoc>,
       remoteDB: null as null | PouchDB.Database<InfraDoc>,
 
-      // FIX: Typed correctly to remove "Unexpected any"
+      // Sync handler typed correctly
       syncHandler: null as null | PouchDB.Replication.Sync<InfraDoc>,
 
       isOffline: true,
@@ -42,7 +42,6 @@ export default defineComponent({
       searchQuery: '',
       sortByLikes: false,
 
-      // FIX: Added 'created_at' to satisfy InfraDoc type
       form: {
         _id: '',
         _rev: '',
@@ -59,10 +58,11 @@ export default defineComponent({
 
   methods: {
     // --- INITIALIZATION ---
-    initDatabases() {
+    async initDatabases() {
       this.localDB = new PouchDB<InfraDoc>(LOCAL_DB_NAME)
       this.remoteDB = new PouchDB<InfraDoc>(REMOTE_DB_URL)
-      this.createIndexes()
+      await this.createIndexes()
+      await this.fetchData()
     },
 
     async createIndexes() {
@@ -114,12 +114,16 @@ export default defineComponent({
     async createData() {
       if (!this.localDB) return
       try {
+        // FIX: Explicitly create the object to avoid "unused variable" errors
         const newDoc: InfraDoc = {
-          ...this.form,
+          title: this.form.title,
+          content: this.form.content,
+          category: this.form.category,
           likes: 0,
           comments: [],
           created_at: new Date().toISOString(),
         }
+
         await this.localDB.post(newDoc)
         this.resetForm()
         await this.fetchData()
@@ -132,16 +136,17 @@ export default defineComponent({
       if (!this.localDB || !this.form._id || !this.form._rev) return
       try {
         const originalDoc = this.docs.find((doc) => doc._id === this.form._id)
-        const comments = originalDoc ? originalDoc.comments : []
-        const likes = originalDoc ? originalDoc.likes : 0
         const createdAt = originalDoc ? originalDoc.created_at : new Date().toISOString()
+        const currentComments = originalDoc ? originalDoc.comments : []
+        const currentLikes = originalDoc ? originalDoc.likes : 0
 
         const updatedDoc: InfraDoc = {
           ...this.form,
-          comments,
-          likes,
           created_at: createdAt,
+          comments: currentComments,
+          likes: currentLikes,
         }
+
         await this.localDB.put(updatedDoc)
         this.resetForm()
         await this.fetchData()
@@ -268,7 +273,6 @@ export default defineComponent({
 
     resetForm() {
       this.isEdit = false
-      // FIX: Added 'created_at' here too
       this.form = {
         _id: '',
         _rev: '',
@@ -288,7 +292,6 @@ export default defineComponent({
 
   mounted() {
     this.initDatabases()
-    this.fetchData()
   },
 
   unmounted() {
@@ -330,6 +333,15 @@ export default defineComponent({
             <div class="form-group">
               <label>Titre</label
               ><input v-model="form.title" required placeholder="Sujet du message" />
+            </div>
+            <div class="form-group">
+              <label>Catégorie</label
+              ><select v-model="form.category">
+                <option>General</option>
+                <option>Work</option>
+                <option>Personal</option>
+                <option>Urgent</option>
+              </select>
             </div>
             <div class="form-group">
               <label>Contenu</label><textarea v-model="form.content" required rows="3"></textarea>
@@ -479,12 +491,19 @@ label {
   color: #7f8c8d;
 }
 input,
+select,
 textarea {
   width: 100%;
   padding: 10px;
   border: 1px solid #ddd;
   border-radius: 6px;
   font-size: 1rem;
+  box-sizing: border-box;
+}
+input:focus,
+textarea:focus {
+  outline: 2px solid #3498db;
+  border-color: transparent;
 }
 .form-actions {
   display: flex;
@@ -534,27 +553,14 @@ textarea {
 .full-width {
   width: 100%;
 }
-.filters-bar {
-  display: flex;
-  gap: 10px;
+.search-bar {
   margin-bottom: 20px;
-  align-items: center;
-  flex-wrap: wrap;
 }
-.search-input {
-  flex-grow: 1;
-  padding: 10px;
+.search-bar input {
+  width: 100%;
+  padding: 12px;
   border: 2px solid #ddd;
-  border-radius: 6px;
-}
-.sort-toggle {
-  font-size: 0.9rem;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  user-select: none;
+  background: #f9f9f9;
 }
 .doc-card {
   background: white;
@@ -562,18 +568,40 @@ textarea {
   border-radius: 8px;
   margin-bottom: 15px;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
-  border: 1px solid #eee;
 }
 .doc-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
 }
 .doc-header h4 {
   margin: 0;
-  font-size: 1.2rem;
-  color: #34495e;
+  font-size: 1.1rem;
+}
+.badge {
+  background: #ecf0f1;
+  color: #7f8c8d;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+}
+.doc-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  border-top: 1px solid #eee;
+  padding-top: 10px;
+}
+.doc-footer small {
+  color: #bdc3c7;
+  font-size: 0.75rem;
+}
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
 }
 .likes-badge {
   background: #fff0f0;
@@ -634,29 +662,6 @@ textarea {
   font-size: 0.9rem;
   width: 100%;
   border: 1px solid #ddd;
-  border-radius: 4px;
-}
-.doc-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 15px;
-  border-top: 1px solid #eee;
-  padding-top: 10px;
-}
-.doc-footer small {
-  color: #bdc3c7;
-  font-size: 0.75rem;
-}
-.btn-icon {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 1.2rem;
-  padding: 5px;
-}
-.btn-icon:hover {
-  background-color: #f1f1f1;
   border-radius: 4px;
 }
 </style>
