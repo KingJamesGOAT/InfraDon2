@@ -3,7 +3,7 @@ import { defineComponent } from 'vue'
 import PouchDB from 'pouchdb'
 import PouchDBFind from 'pouchdb-find'
 
-// Register plugins
+// Enregistrement du plugin de recherche
 PouchDB.plugin(PouchDBFind)
 
 // --- INTERFACES ---
@@ -18,7 +18,6 @@ type InfraDoc = {
   created_at: string
 }
 
-// Interface pour la 2ème collection (Logs)
 type LogDoc = {
   _id?: string
   action: string
@@ -27,11 +26,8 @@ type LogDoc = {
 }
 
 // --- CONFIGURATION ---
-// Collection 1 : Messages (Déjà existante)
 const REMOTE_DB_URL = 'http://steve:Goldy_2002_2002@127.0.0.1:5984/infra_53_0850'
 const LOCAL_DB_NAME = 'infra_local_db'
-
-// Collection 2 : Logs
 const REMOTE_LOGS_URL = 'http://steve:Goldy_2002_2002@127.0.0.1:5984/infra_logs'
 const LOCAL_LOGS_NAME = 'infra_logs_local'
 
@@ -40,22 +36,16 @@ export default defineComponent({
 
   data() {
     return {
-      // DB 1 : Messages
       localDB: null as null | PouchDB.Database<InfraDoc>,
       remoteDB: null as null | PouchDB.Database<InfraDoc>,
-
-      // DB 2 : Logs (Nouvelle collection)
       logsLocalDB: null as null | PouchDB.Database<LogDoc>,
       logsRemoteDB: null as null | PouchDB.Database<LogDoc>,
-
-      // Sync Handlers
       syncHandler: null as null | PouchDB.Replication.Sync<InfraDoc>,
       logsSyncHandler: null as null | PouchDB.Replication.Sync<LogDoc>,
 
       isOffline: true,
-      syncStatus: 'Offline',
+      syncStatus: 'Déconnecté',
 
-      // Data
       docs: [] as InfraDoc[],
       logs: [] as LogDoc[],
 
@@ -71,7 +61,7 @@ export default defineComponent({
         content: '',
         likes: 0,
         comments: [],
-        category: 'General',
+        category: 'Général',
         created_at: '',
       } as InfraDoc,
       isEdit: false,
@@ -79,13 +69,9 @@ export default defineComponent({
   },
 
   methods: {
-    // --- INITIALIZATION ---
     async initDatabases() {
-      // Init Collection 1 (Messages)
       this.localDB = new PouchDB<InfraDoc>(LOCAL_DB_NAME)
       this.remoteDB = new PouchDB<InfraDoc>(REMOTE_DB_URL)
-
-      // Init Collection 2 (Logs)
       this.logsLocalDB = new PouchDB<LogDoc>(LOCAL_LOGS_NAME)
       this.logsRemoteDB = new PouchDB<LogDoc>(REMOTE_LOGS_URL)
 
@@ -100,23 +86,29 @@ export default defineComponent({
         await this.localDB.createIndex({ index: { fields: ['title'] } })
         await this.localDB.createIndex({ index: { fields: ['likes'] } })
       } catch (err) {
-        console.error('Index creation failed:', err)
+        console.error('Erreur création index:', err)
       }
     },
 
-    // --- CRUD COLLECTION 1 (Messages) ---
     async fetchData() {
       if (!this.localDB) return
       this.loading = true
+      this.error = ''
+
       try {
         let resultDocs: InfraDoc[] = []
 
-        if (this.searchQuery && this.searchQuery.length > 0) {
+        if (this.searchQuery && this.searchQuery.trim().length > 0) {
           const result = await this.localDB.find({
-            selector: { title: { $regex: new RegExp(this.searchQuery, 'i') } },
-            sort: this.sortByLikes ? [{ likes: 'desc' }] : undefined,
+            selector: {
+              title: { $regex: new RegExp(this.searchQuery, 'i') },
+            },
           })
           resultDocs = result.docs as InfraDoc[]
+
+          if (this.sortByLikes) {
+            resultDocs.sort((a, b) => (b.likes || 0) - (a.likes || 0))
+          }
         } else if (this.sortByLikes) {
           const result = await this.localDB.find({
             selector: { likes: { $gte: 0 } },
@@ -124,52 +116,60 @@ export default defineComponent({
           })
           resultDocs = result.docs as InfraDoc[]
         } else {
-          const result = await this.localDB.allDocs({ include_docs: true, descending: true })
-          resultDocs = result.rows.map((row) => row.doc as InfraDoc)
+          const result = await this.localDB.allDocs({ include_docs: true })
+          resultDocs = result.rows
+            .map((row) => row.doc as InfraDoc)
+            .filter((doc) => !doc._id?.startsWith('_design'))
+            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
         }
+
         this.docs = resultDocs
       } catch (err) {
-        this.error = 'Error fetching data: ' + (err as Error).message
+        this.error = 'Erreur lors du chargement : ' + (err as Error).message
+        console.error(err)
       } finally {
         this.loading = false
       }
     },
 
-    // --- CRUD COLLECTION 2 (Logs) ---
     async fetchLogs() {
       if (!this.logsLocalDB) return
       try {
         const result = await this.logsLocalDB.allDocs({
           include_docs: true,
           descending: true,
-          limit: 5,
+          limit: 10,
         })
-        this.logs = result.rows.map((row) => row.doc as LogDoc)
+        this.logs = result.rows
+          .map((row) => row.doc as LogDoc)
+          .filter((doc) => !doc._id?.startsWith('_design'))
       } catch (err) {
-        console.error('Erreur fetch logs', err)
+        console.error('Erreur logs', err)
       }
     },
 
     async addLog(action: string, details: string) {
       if (!this.logsLocalDB) return
       try {
+        const id = new Date().toISOString()
         const newLog: LogDoc = {
+          _id: id,
           action,
           details,
-          date: new Date().toLocaleString(),
+          date: new Date().toLocaleString('fr-FR'),
         }
-        await this.logsLocalDB.post(newLog)
+        await this.logsLocalDB.put(newLog)
         await this.fetchLogs()
       } catch (err) {
         console.error("Impossible d'ajouter le log", err)
       }
     },
 
-    // --- ACTIONS PRINCIPALES ---
     async createData() {
       if (!this.localDB) return
       try {
         const newDoc: InfraDoc = {
+          _id: new Date().toISOString(),
           title: this.form.title,
           content: this.form.content,
           category: this.form.category,
@@ -178,87 +178,89 @@ export default defineComponent({
           created_at: new Date().toISOString(),
         }
 
-        await this.localDB.post(newDoc)
-        // Ajout dans la 2ème collection
+        await this.localDB.put(newDoc)
         await this.addLog('Création', `Message "${newDoc.title}" créé`)
-
         this.resetForm()
         await this.fetchData()
       } catch (err) {
-        this.error = 'Create error: ' + (err as Error).message
+        this.error = 'Erreur création : ' + (err as Error).message
       }
     },
 
     async updateData() {
       if (!this.localDB || !this.form._id || !this.form._rev) return
       try {
-        const originalDoc = this.docs.find((doc) => doc._id === this.form._id)
+        const originalDoc = await this.localDB.get(this.form._id)
         const updatedDoc: InfraDoc = {
-          ...this.form,
-          created_at: originalDoc?.created_at || new Date().toISOString(),
-          comments: originalDoc?.comments || [],
-          likes: originalDoc?.likes || 0,
+          ...originalDoc,
+          title: this.form.title,
+          content: this.form.content,
+          category: this.form.category,
         }
         await this.localDB.put(updatedDoc)
         await this.addLog('Modification', `Message "${updatedDoc.title}" modifié`)
-
         this.resetForm()
         await this.fetchData()
       } catch (err) {
-        this.error = 'Update error: ' + (err as Error).message
+        this.error = 'Erreur modification : ' + (err as Error).message
       }
     },
 
     async deleteData(doc: InfraDoc) {
       if (!this.localDB || !doc._id || !doc._rev) return
+      if (!confirm('Voulez-vous vraiment supprimer ce message ?')) return
+
       try {
         await this.localDB.remove(doc._id, doc._rev)
-        // Ajout dans la 2ème collection
         await this.addLog('Suppression', `Message "${doc.title}" supprimé`)
-
         await this.fetchData()
       } catch (err) {
-        this.error = 'Delete error: ' + (err as Error).message
+        this.error = 'Erreur suppression : ' + (err as Error).message
       }
     },
 
-    // --- SOCIAL & REPLICATION ---
     async likeMessage(doc: InfraDoc) {
       if (!this.localDB || !doc._id) return
       try {
-        doc.likes = (doc.likes || 0) + 1
-        await this.localDB.put(doc)
+        const docToUpdate = { ...doc }
+        docToUpdate.likes = (docToUpdate.likes || 0) + 1
+        await this.localDB.put(docToUpdate)
         await this.fetchData()
       } catch (err) {
-        this.error = 'Like error: ' + (err as Error).message
+        if ((err as any).name === 'conflict') {
+          this.fetchData()
+        } else {
+          this.error = 'Erreur like : ' + (err as Error).message
+        }
       }
     },
 
     async addComment(doc: InfraDoc, commentText: string) {
       if (!this.localDB || !doc._id || !commentText.trim()) return
       try {
-        if (!doc.comments) doc.comments = []
-        doc.comments.push(commentText)
-        await this.localDB.put(doc)
+        const docToUpdate = { ...doc }
+        if (!docToUpdate.comments) docToUpdate.comments = []
+        docToUpdate.comments.push(commentText)
+        await this.localDB.put(docToUpdate)
         await this.fetchData()
       } catch (err) {
-        this.error = 'Add comment error: ' + (err as Error).message
+        this.error = 'Erreur commentaire : ' + (err as Error).message
       }
     },
 
     async deleteComment(doc: InfraDoc, index: number) {
       if (!this.localDB || !doc._id) return
       try {
-        doc.comments.splice(index, 1)
-        await this.localDB.put(doc)
+        const docToUpdate = { ...doc }
+        docToUpdate.comments.splice(index, 1)
+        await this.localDB.put(docToUpdate)
         await this.fetchData()
       } catch (err) {
-        this.error = 'Delete comment error: ' + (err as Error).message
+        this.error = 'Erreur suppression com : ' + (err as Error).message
       }
     },
 
     toggleSync() {
-      // FIX: Use if/else instead of ternary operator to satisfy ESLint
       if (this.isOffline) {
         this.startSync()
       } else {
@@ -269,28 +271,31 @@ export default defineComponent({
     startSync() {
       if (!this.localDB || !this.remoteDB || !this.logsLocalDB || !this.logsRemoteDB) return
       this.isOffline = false
-      this.syncStatus = 'Syncing...'
+      this.syncStatus = 'Synchronisation...'
 
-      // Sync Collection 1 (Messages)
-      this.syncHandler = PouchDB.sync(this.localDB, this.remoteDB, { live: true, retry: true })
-        .on('change', () => {
-          this.fetchData()
+      const syncOptions = { live: true, retry: true }
+
+      this.syncHandler = PouchDB.sync(this.localDB, this.remoteDB, syncOptions)
+        .on('change', (info) => {
+          this.syncStatus = 'Connecté (Données à jour)'
+          if (info.direction === 'pull') {
+            this.fetchData()
+          }
+        })
+        .on('paused', () => {
+          this.syncStatus = 'Connecté'
+        })
+        .on('active', () => {
+          this.syncStatus = 'Synchronisation...'
         })
         .on('error', (err) => {
-          this.error = 'Sync Msg Error: ' + (err as Error).message
+          this.syncStatus = 'Erreur Réseau'
+          this.error = 'Erreur Synchro : ' + (err as Error).message
         })
 
-      // Sync Collection 2 (Logs)
-      this.logsSyncHandler = PouchDB.sync(this.logsLocalDB, this.logsRemoteDB, {
-        live: true,
-        retry: true,
-      })
-        .on('change', () => {
-          this.fetchLogs()
-        })
-        .on('error', (err) => {
-          console.error('Sync Logs Error', err)
-        })
+      this.logsSyncHandler = PouchDB.sync(this.logsLocalDB, this.logsRemoteDB, syncOptions)
+        .on('change', () => this.fetchLogs())
+        .on('error', (err) => console.error('Erreur Synchro Logs', err))
     },
 
     stopSync() {
@@ -303,36 +308,37 @@ export default defineComponent({
         this.logsSyncHandler = null
       }
       this.isOffline = true
-      this.syncStatus = 'Offline'
+      this.syncStatus = 'Déconnecté'
     },
 
-    // --- FACTORY ---
     async generateFakeData() {
       if (!this.localDB) return
       const fakeDocs: InfraDoc[] = []
-      const categories = ['Work', 'Personal', 'Urgent', 'General']
-      for (let i = 0; i < 5; i++) {
+      const categories = ['Travail', 'Personnel', 'Urgent', 'Général']
+
+      for (let i = 0; i < 3; i++) {
         fakeDocs.push({
+          _id: new Date().toISOString() + Math.random(),
           title: `Sujet ${Math.floor(Math.random() * 1000)}`,
-          content: `Contenu généré ${i}`,
-          likes: Math.floor(Math.random() * 100),
+          content: `Contenu généré ${i}. Lorem ipsum dolor sit amet.`,
+          likes: Math.floor(Math.random() * 20),
           comments: [],
-          category: categories[i % 4],
+          category: categories[Math.floor(Math.random() * categories.length)],
           created_at: new Date().toISOString(),
         })
       }
       try {
         await this.localDB.bulkDocs(fakeDocs)
-        await this.addLog('Factory', '5 documents générés')
+        await this.addLog('Factory', '3 documents générés')
         await this.fetchData()
       } catch (err) {
-        this.error = 'Factory error: ' + (err as Error).message
+        this.error = 'Erreur Factory : ' + (err as Error).message
       }
     },
 
     startEdit(doc: InfraDoc) {
       this.isEdit = true
-      this.form = { ...doc }
+      this.form = JSON.parse(JSON.stringify(doc))
     },
     resetForm() {
       this.isEdit = false
@@ -343,7 +349,7 @@ export default defineComponent({
         content: '',
         likes: 0,
         comments: [],
-        category: 'General',
+        category: 'Général',
         created_at: '',
       }
     },
@@ -364,141 +370,138 @@ export default defineComponent({
 </script>
 
 <template>
-  <div class="container">
-    <header>
-      <div class="header-left">
-        <h1 class="page-title">InfraSync Messenger</h1>
-        <div class="author-badge">
-          <span class="author-name">Steve Benjamin</span>
-          <span class="separator">|</span>
-          <span class="class-name">M53-1</span>
+  <div class="full-screen-wrapper">
+    <div class="app-layout">
+      <header class="main-header">
+        <div class="header-brand">
+          <h1>InfraSync</h1>
+          <div class="subtitle">
+            <span class="user-name">Steve Benjamin</span>
+            <span class="class-tag">M53-1</span>
+          </div>
         </div>
-      </div>
 
-      <div class="sync-controls">
-        <div class="status-indicator">
-          <span class="status-dot" :class="isOffline ? 'red' : 'green'"></span>
-          <span>{{ syncStatus }}</span>
-        </div>
-        <button @click="toggleSync" class="btn" :class="isOffline ? 'btn-success' : 'btn-warning'">
-          {{ isOffline ? 'Go Online' : 'Go Offline' }}
-        </button>
-      </div>
-    </header>
-
-    <div v-if="error" class="error-msg">{{ error }}</div>
-
-    <div class="content-grid">
-      <div class="column left-column">
-        <div class="card factory-card">
-          <h3>🛠️ Outils</h3>
-          <button @click="generateFakeData" class="btn btn-secondary full-width">
-            Générer Données (Factory)
+        <div class="sync-status-container">
+          <div class="indicator" :class="isOffline ? 'offline' : 'online'">
+            <span class="led"></span>
+            <span class="status-text">{{ syncStatus }}</span>
+          </div>
+          <button @click="toggleSync" class="sync-btn" :class="isOffline ? 'btn-green' : 'btn-red'">
+            {{ isOffline ? 'Passer en ligne' : 'Déconnecter' }}
           </button>
         </div>
+      </header>
 
-        <div class="card form-card">
-          <h3>{{ isEdit ? '✏️ Modifier' : '➕ Nouveau Message' }}</h3>
-          <form @submit.prevent="submitForm">
-            <div class="form-group">
-              <label>Titre</label>
-              <input v-model="form.title" required placeholder="Sujet du message..." />
-            </div>
-            <div class="form-group">
-              <label>Catégorie</label>
-              <select v-model="form.category">
-                <option>General</option>
-                <option>Work</option>
-                <option>Personal</option>
-                <option>Urgent</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Contenu</label>
-              <textarea
-                v-model="form.content"
-                required
-                rows="4"
-                placeholder="Votre message..."
-              ></textarea>
-            </div>
-            <div class="form-actions">
-              <button type="submit" class="btn btn-primary full-width">
-                {{ isEdit ? 'Sauvegarder' : 'Publier' }}
-              </button>
-              <button
-                type="button"
-                v-if="isEdit"
-                @click="resetForm"
-                class="btn btn-text full-width"
-              >
-                Annuler
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <div class="card logs-card">
-          <h3>📜 Historique (Logs)</h3>
-          <ul class="logs-list">
-            <li v-for="log in logs" :key="log._id">
-              <span class="log-date">{{ log.date.split(' ')[1] }}</span>
-              <span class="log-details"
-                ><strong>{{ log.action }}</strong> : {{ log.details }}</span
-              >
-            </li>
-            <li v-if="logs.length === 0" class="empty-log">Aucun historique récent.</li>
-          </ul>
-        </div>
+      <div v-if="error" class="error-banner">
+        <span>⚠️ {{ error }}</span>
+        <button @click="error = ''">✕</button>
       </div>
 
-      <div class="column right-column">
-        <div class="filters-bar">
-          <div class="search-wrapper">
-            <span class="search-icon">🔍</span>
-            <input
-              v-model="searchQuery"
-              @input="fetchData"
-              placeholder="Rechercher un message par titre..."
-              class="search-input"
-            />
-          </div>
-          <label class="sort-toggle">
-            <input type="checkbox" v-model="sortByLikes" @change="fetchData" />
-            <span class="toggle-label">Trier par Likes ❤️</span>
-          </label>
-        </div>
-
-        <div class="doc-list">
-          <div v-if="docs.length === 0 && !loading" class="empty-state">
-            <p>Aucun message trouvé.</p>
+      <div class="content-wrapper">
+        <aside class="sidebar">
+          <div class="panel factory-panel">
+            <button @click="generateFakeData" class="btn-action full-width">
+              🎲 Générer Données (Factory)
+            </button>
           </div>
 
-          <div v-for="doc in docs" :key="doc._id" class="doc-card">
-            <div class="doc-header">
-              <div class="title-group">
-                <h4>{{ doc.title }}</h4>
-                <span class="badge" :class="doc.category.toLowerCase()">{{ doc.category }}</span>
+          <div class="panel form-panel">
+            <h2>{{ isEdit ? 'Modifier' : 'Nouveau Message' }}</h2>
+            <form @submit.prevent="submitForm">
+              <div class="input-group">
+                <input v-model="form.title" required placeholder="Titre du message" />
               </div>
-              <div class="likes-container">
-                <button @click="likeMessage(doc)" class="btn-like">❤️ {{ doc.likes }}</button>
+
+              <div class="input-group">
+                <select v-model="form.category">
+                  <option>Général</option>
+                  <option>Travail</option>
+                  <option>Personnel</option>
+                  <option>Urgent</option>
+                </select>
               </div>
+
+              <div class="input-group">
+                <textarea
+                  v-model="form.content"
+                  required
+                  rows="5"
+                  placeholder="Votre contenu..."
+                ></textarea>
+              </div>
+
+              <div class="form-actions">
+                <button type="submit" class="btn-primary full-width">
+                  {{ isEdit ? 'Sauvegarder' : 'Publier' }}
+                </button>
+                <button
+                  v-if="isEdit"
+                  type="button"
+                  @click="resetForm"
+                  class="btn-secondary full-width"
+                >
+                  Annuler
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <div class="panel logs-panel">
+            <h2>Historique</h2>
+            <div class="logs-scroll">
+              <div v-for="log in logs" :key="log._id" class="log-entry">
+                <span class="time">{{ log.date.split(' ')[1] }}</span>
+                <span class="action">{{ log.action }}</span>
+                <span class="detail">{{ log.details }}</span>
+              </div>
+              <div v-if="logs.length === 0" class="empty-logs">Vide</div>
+            </div>
+          </div>
+        </aside>
+
+        <main class="feed-container">
+          <div class="panel filters">
+            <div class="search-box">
+              <span class="icon">🔍</span>
+              <input
+                v-model="searchQuery"
+                @input="fetchData"
+                placeholder="Rechercher un titre..."
+              />
+            </div>
+            <div class="toggle-box">
+              <input type="checkbox" id="sort" v-model="sortByLikes" @change="fetchData" />
+              <label for="sort">Trier par Likes ❤️</label>
+            </div>
+          </div>
+
+          <div class="cards-list">
+            <div v-if="docs.length === 0" class="empty-feed">
+              <p>Aucun message à afficher.</p>
             </div>
 
-            <div class="doc-body">
-              <p>{{ doc.content }}</p>
-            </div>
+            <article v-for="doc in docs" :key="doc._id" class="msg-card">
+              <div class="card-top">
+                <div class="card-title">
+                  <h3>{{ doc.title }}</h3>
+                  <span class="badge" :class="doc.category">{{ doc.category }}</span>
+                </div>
+                <button @click="likeMessage(doc)" class="heart-btn">❤️ {{ doc.likes }}</button>
+              </div>
 
-            <div class="comments-section">
-              <h5>Commentaires ({{ doc.comments ? doc.comments.length : 0 }})</h5>
-              <ul v-if="doc.comments && doc.comments.length > 0">
-                <li v-for="(comment, idx) in doc.comments" :key="idx">
-                  <span class="comment-text">{{ comment }}</span>
-                  <span @click="deleteComment(doc, idx)" class="delete-x" title="Supprimer">×</span>
-                </li>
-              </ul>
-              <div class="add-comment">
+              <div class="card-content">
+                {{ doc.content }}
+              </div>
+
+              <div class="card-comments">
+                <div class="comments-list">
+                  <div v-for="(com, idx) in doc.comments" :key="idx" class="comment-bubble">
+                    <span>{{ com }}</span>
+                    <button @click="deleteComment(doc, idx)" class="del-com">×</button>
+                  </div>
+                </div>
                 <input
+                  class="add-com-input"
                   placeholder="Écrire un commentaire..."
                   @keyup.enter="
                     addComment(doc, ($event.target as HTMLInputElement).value)
@@ -506,522 +509,399 @@ export default defineComponent({
                   "
                 />
               </div>
-            </div>
 
-            <div class="doc-footer">
-              <span class="doc-id">ID: {{ doc._id?.slice(0, 8) }}...</span>
-              <div class="actions">
-                <button @click="startEdit(doc)" class="btn-icon" title="Modifier">✏️</button>
-                <button @click="deleteData(doc)" class="btn-icon delete" title="Supprimer">
-                  🗑️
-                </button>
+              <div class="card-actions">
+                <span class="uuid">ID: {{ doc._id?.slice(0, 6) }}</span>
+                <div class="buttons">
+                  <button @click="startEdit(doc)">✏️</button>
+                  <button @click="deleteData(doc)" class="danger">🗑️</button>
+                </div>
               </div>
-            </div>
+            </article>
           </div>
-        </div>
+        </main>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* --- DARK THEME MODERN CSS --- */
+/* --- DARK THEME & LAYOUT VARIABLES --- */
 :root {
-  --bg-color: #121212;
-  --card-bg: #1e1e1e;
-  --input-bg: #252525;
+  --bg-dark: #121212;
+  --bg-panel: #1e1e1e;
+  --bg-input: #2c2c2c;
   --text-main: #e0e0e0;
-  --text-muted: #a0a0a0;
-  --border-color: #333333;
-  --primary-color: #3a86ff; /* Bleu */
-  --accent-color: #8338ec; /* Violet */
-  --success-color: #06d6a0; /* Vert */
-  --danger-color: #ef476f; /* Rouge */
-  --warning-color: #ffbe0b; /* Jaune */
+  --text-dim: #a0a0a0;
+  --accent: #bb86fc;
+  --primary: #3700b3;
+  --border: #333;
 }
 
-/* Global Layout */
-.container {
-  /* Use almost full width for laptop feeling */
-  width: 96%;
-  max-width: 1800px;
-  margin: 0 auto;
-  font-family:
-    'Inter',
-    system-ui,
-    -apple-system,
-    sans-serif;
+/* Wrapper global pour centrer et prendre toute la hauteur */
+.full-screen-wrapper {
+  background-color: #121212; /* Dark background global */
   color: #e0e0e0;
-  padding: 20px 0;
-}
-
-/* Header */
-header {
+  min-height: 100vh;
+  width: 100%;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 40px;
-  padding: 20px 30px;
-  background: #1e1e1e;
-  border-radius: 16px;
-  border: 1px solid #333;
+  justify-content: center; /* Centre le contenu horizontalement */
+  font-family: 'Inter', sans-serif;
 }
 
-.header-left {
+/* Conteneur principal */
+.app-layout {
+  width: 100%;
+  max-width: 1600px; /* Largeur max pour ne pas trop étirer sur grand écran */
+  padding: 20px;
   display: flex;
   flex-direction: column;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 2.2rem;
-  font-weight: 800;
-  background: linear-gradient(90deg, #3a86ff, #8338ec);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  letter-spacing: -1px;
-}
-
-.author-badge {
-  margin-top: 5px;
-  font-size: 0.95rem;
-  color: #a0a0a0;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.author-name {
-  color: #fff;
-}
-.separator {
-  color: #3a86ff;
-  font-weight: bold;
-}
-.class-name {
-  background: #2c2c2c;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  border: 1px solid #444;
-}
-
-/* Controls */
-.sync-controls {
-  display: flex;
-  align-items: center;
   gap: 20px;
 }
 
-.status-indicator {
+/* --- HEADER --- */
+.main-header {
+  background-color: #1e1e1e;
+  padding: 15px 25px;
+  border-radius: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid #333;
+}
+
+.header-brand h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  background: linear-gradient(45deg, #bb86fc, #03dac6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.subtitle {
+  font-size: 0.85rem;
+  color: #a0a0a0;
+  margin-top: 4px;
+}
+.class-tag {
+  background: #333;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  font-size: 0.75rem;
+}
+
+.sync-status-container {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+.indicator {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 0.9rem;
-  font-weight: 600;
-  color: #ccc;
-  background: #252525;
-  padding: 8px 16px;
-  border-radius: 50px;
-  border: 1px solid #333;
+  font-weight: bold;
 }
-
-.status-dot {
+.led {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  display: inline-block;
+}
+.online {
+  color: #03dac6;
+}
+.online .led {
+  background: #03dac6;
+  box-shadow: 0 0 8px #03dac6;
+}
+.offline {
+  color: #cf6679;
+}
+.offline .led {
+  background: #cf6679;
 }
 
-.green {
-  background-color: #06d6a0;
-  box-shadow: 0 0 8px rgba(6, 214, 160, 0.6);
+.sync-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
 }
-.red {
-  background-color: #ef476f;
+.btn-green {
+  background: #03dac6;
+  color: #000;
+}
+.btn-red {
+  background: #cf6679;
+  color: #000;
 }
 
-/* Grid Layout - Sidebar Fixed, Content Liquid */
-.content-grid {
+/* --- GRID LAYOUT --- */
+.content-wrapper {
   display: grid;
-  /* Sidebar wider (400px), Right column takes all remaining space */
-  grid-template-columns: 400px 1fr;
-  gap: 30px;
+  grid-template-columns: 350px 1fr; /* Sidebar fixe, Reste flexible */
+  gap: 20px;
+  align-items: start;
 }
 
-@media (max-width: 1024px) {
-  .content-grid {
-    grid-template-columns: 1fr;
-  }
-  .left-column {
-    margin-bottom: 30px;
-  }
-}
-
-/* Cards */
-.card {
+/* --- PANELS (Commun) --- */
+.panel {
   background: #1e1e1e;
-  padding: 25px;
+  padding: 20px;
   border-radius: 12px;
   border: 1px solid #333;
-  margin-bottom: 25px;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-}
-
-.card h3 {
-  margin-top: 0;
   margin-bottom: 20px;
+}
+.panel h2 {
+  margin: 0 0 15px 0;
   font-size: 1.1rem;
   color: #fff;
   border-bottom: 1px solid #333;
-  padding-bottom: 15px;
+  padding-bottom: 10px;
 }
 
-/* Forms */
-.form-group {
-  margin-bottom: 18px;
+/* --- SIDEBAR --- */
+.btn-action {
+  background: #333;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 10px;
+  width: 100%;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-action:hover {
+  background: #444;
 }
 
-label {
-  display: block;
-  margin-bottom: 8px;
-  font-weight: 600;
-  font-size: 0.8rem;
-  color: #a0a0a0;
-  text-transform: uppercase;
+.input-group {
+  margin-bottom: 12px;
 }
-
 input,
 select,
 textarea {
   width: 100%;
-  padding: 14px;
-  background-color: #252525;
+  background: #2c2c2c;
   border: 1px solid #444;
-  border-radius: 8px;
   color: #fff;
-  font-size: 0.95rem;
-  transition: border-color 0.2s;
-  box-sizing: border-box;
+  padding: 10px;
+  border-radius: 6px;
+  font-family: inherit;
 }
-
 input:focus,
-select:focus,
 textarea:focus {
+  border-color: #bb86fc;
   outline: none;
-  border-color: #3a86ff;
-  background-color: #2a2a2a;
-}
-
-/* Buttons */
-.btn {
-  padding: 12px 24px;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 0.95rem;
-  transition: filter 0.2s;
-}
-.btn:hover {
-  filter: brightness(1.1);
 }
 
 .btn-primary {
-  background: #3a86ff;
-  color: white;
+  background: #bb86fc;
+  color: #000;
+  border: none;
+  padding: 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: bold;
+  margin-bottom: 5px;
 }
 .btn-secondary {
-  background: #444;
-  color: white;
-}
-.btn-success {
-  background: #06d6a0;
-  color: #000;
-}
-.btn-warning {
-  background: #ffbe0b;
-  color: #000;
-}
-.btn-text {
   background: transparent;
-  color: #888;
-  margin-top: 10px;
-}
-.btn-text:hover {
-  color: #fff;
-}
-.full-width {
-  width: 100%;
-}
-
-/* Logs */
-.logs-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-.logs-list li {
-  font-size: 0.85rem;
-  padding: 10px 0;
-  border-bottom: 1px solid #333;
-  display: flex;
-  justify-content: space-between;
-}
-.log-date {
-  color: #555;
-  font-family: monospace;
-  min-width: 60px;
-}
-.log-details {
-  color: #ccc;
-  text-align: right;
-}
-
-/* Filter Bar */
-.filters-bar {
-  display: flex;
-  gap: 20px;
-  margin-bottom: 25px;
-  align-items: stretch;
-}
-
-.search-wrapper {
-  flex-grow: 1;
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.search-icon {
-  position: absolute;
-  left: 15px;
-  font-size: 1.2rem;
-  pointer-events: none;
-}
-
-.search-input {
-  width: 100%;
-  padding: 15px 15px 15px 45px; /* Padding left for icon */
-  background-color: #1e1e1e;
-  border: 1px solid #333;
-  font-size: 1.1rem;
-}
-
-.sort-toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  color: #a0a0a0;
+  border: 1px solid #444;
+  padding: 8px;
+  border-radius: 6px;
   cursor: pointer;
-  background: #1e1e1e;
-  padding: 0 25px;
-  border-radius: 8px;
-  border: 1px solid #333;
-  user-select: none;
-  min-width: 180px;
-  justify-content: center;
 }
 
-.toggle-label {
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-
-/* Document Cards */
-.doc-card {
-  background: #1e1e1e;
-  border-radius: 12px;
-  border: 1px solid #333;
-  padding: 25px;
-  margin-bottom: 25px;
-  transition: transform 0.2s;
-  position: relative;
-}
-
-.doc-card:hover {
-  transform: translateY(-3px);
-  border-color: #555;
-}
-
-.doc-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 20px;
-}
-
-.title-group h4 {
-  margin: 0 0 8px 0;
-  font-size: 1.5rem;
-  color: #fff;
-}
-
-.badge {
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: bold;
-  text-transform: uppercase;
-  background: #333;
-  color: #fff;
-  display: inline-block;
-}
-
-/* Badge variants */
-.badge.general {
-  background: #4a4e69;
-}
-.badge.work {
-  background: #3a86ff;
-}
-.badge.personal {
-  background: #8338ec;
-}
-.badge.urgent {
-  background: #ef476f;
-}
-
-.btn-like {
-  background: #252525;
-  color: #ff4d6d;
-  border: 1px solid #ff4d6d;
-  border-radius: 30px;
-  padding: 6px 15px;
-  font-size: 0.9rem;
-  cursor: pointer;
-  font-weight: 700;
-  transition: all 0.2s;
-}
-.btn-like:hover {
-  background: #ff4d6d;
-  color: #fff;
-}
-
-.doc-body p {
-  color: #ccc;
-  line-height: 1.7;
-  font-size: 1.05rem;
-  margin-bottom: 25px;
-}
-
-/* Comments */
-.comments-section {
-  background: #181818;
-  padding: 20px;
-  border-radius: 8px;
-  border: 1px solid #333;
-}
-
-.comments-section h5 {
-  margin: 0 0 15px 0;
-  color: #777;
+.logs-scroll {
+  max-height: 300px;
+  overflow-y: auto;
   font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 1px;
+}
+.log-entry {
+  border-bottom: 1px solid #333;
+  padding: 6px 0;
+  display: flex;
+  gap: 8px;
+}
+.log-entry .time {
+  color: #666;
+  font-family: monospace;
+}
+.log-entry .action {
+  color: #03dac6;
+  font-weight: bold;
 }
 
-.comments-section ul {
-  padding: 0;
-  list-style: none;
+/* --- FEED & FILTERS --- */
+.filters {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.search-box {
+  flex-grow: 1;
+  margin-right: 20px;
+  position: relative;
+}
+.search-box input {
+  padding-left: 35px;
+}
+.search-box .icon {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+}
+.toggle-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* --- CARDS --- */
+.cards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+.msg-card {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 12px;
+  padding: 20px;
+  transition: transform 0.2s;
+}
+.msg-card:hover {
+  border-color: #555;
+  transform: translateY(-2px);
+}
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 15px;
 }
-.comments-section li {
-  background: #252525;
-  margin-bottom: 8px;
-  padding: 10px 15px;
-  border-radius: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+.card-title h3 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+.badge {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #333;
+  margin-top: 5px;
+  display: inline-block;
+}
+.badge.Urgent {
+  background: #cf6679;
+  color: black;
+}
+.badge.Travail {
+  background: #03dac6;
+  color: black;
 }
 
-.comment-text {
-  color: #ddd;
+.heart-btn {
+  background: #2c2c2c;
+  border: 1px solid #cf6679;
+  color: #cf6679;
+  padding: 5px 12px;
+  border-radius: 20px;
+  cursor: pointer;
+}
+.heart-btn:hover {
+  background: #cf6679;
+  color: white;
+}
+
+.card-content {
+  margin-bottom: 20px;
+  line-height: 1.5;
+  color: #ccc;
+}
+
+.card-comments {
+  background: #151515;
+  padding: 10px;
+  border-radius: 8px;
+  margin-bottom: 15px;
+}
+.comment-bubble {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid #333;
+  padding: 5px 0;
   font-size: 0.9rem;
 }
-.delete-x {
+.del-com {
+  background: none;
+  border: none;
   color: #666;
   cursor: pointer;
-  font-size: 1.2rem;
-  line-height: 1;
 }
-.delete-x:hover {
-  color: #ef476f;
+.del-com:hover {
+  color: #cf6679;
 }
-
-.add-comment input {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid #444;
-  border-radius: 0;
-  padding: 10px 0;
-  color: #fff;
-}
-.add-comment input:focus {
-  border-bottom-color: #3a86ff;
+.add-com-input {
+  margin-top: 10px;
+  background: #1e1e1e;
+  font-size: 0.9rem;
+  padding: 8px;
 }
 
-/* Footer */
-.doc-footer {
+.card-actions {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 25px;
-  padding-top: 15px;
-  border-top: 1px solid #333;
-}
-
-.doc-id {
-  color: #555;
   font-size: 0.8rem;
-  font-family: monospace;
+  color: #666;
 }
-
-.actions {
-  display: flex;
-  gap: 10px;
-}
-
-.btn-icon {
-  background: #252525;
+.card-actions button {
+  background: #2c2c2c;
   border: 1px solid #444;
-  color: #fff;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  padding: 6px;
+  border-radius: 4px;
   cursor: pointer;
-  font-size: 1.1rem;
-  transition: all 0.2s;
+  margin-left: 5px;
 }
-.btn-icon:hover {
-  border-color: #3a86ff;
-  background: #3a86ff;
-}
-.btn-icon.delete:hover {
-  border-color: #ef476f;
-  background: #ef476f;
+.card-actions button.danger:hover {
+  border-color: #cf6679;
+  background: #3a1c22;
 }
 
-.error-msg {
-  background: rgba(239, 71, 111, 0.15);
-  color: #ef476f;
-  padding: 15px;
+/* ERROR BANNER */
+.error-banner {
+  background: #cf6679;
+  color: black;
+  padding: 10px 20px;
   border-radius: 8px;
-  margin-bottom: 30px;
-  border: 1px solid rgba(239, 71, 111, 0.3);
-  text-align: center;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   font-weight: bold;
 }
+.error-banner button {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
 
-.empty-state {
-  text-align: center;
-  padding: 60px;
-  color: #555;
-  font-style: italic;
-  font-size: 1.1rem;
+/* RESPONSIVE */
+@media (max-width: 900px) {
+  .content-wrapper {
+    grid-template-columns: 1fr;
+  }
+  .sidebar {
+    order: 2;
+  }
+  .feed-container {
+    order: 1;
+  }
 }
 </style>
