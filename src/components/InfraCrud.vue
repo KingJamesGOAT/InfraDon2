@@ -65,6 +65,7 @@ export default defineComponent({
         created_at: '',
       } as InfraDoc,
       isEdit: false,
+      expandedComments: [] as string[],
     }
   },
 
@@ -85,6 +86,7 @@ export default defineComponent({
       try {
         await this.localDB.createIndex({ index: { fields: ['title'] } })
         await this.localDB.createIndex({ index: { fields: ['likes'] } })
+        await this.localDB.createIndex({ index: { fields: ['created_at'] } })
       } catch (err) {
         console.error('Erreur création index:', err)
       }
@@ -99,28 +101,34 @@ export default defineComponent({
         let resultDocs: InfraDoc[] = []
 
         if (this.searchQuery && this.searchQuery.trim().length > 0) {
+          // Recherche par titre (Note: le tri par likes/date avec regex est complexe en PouchDB sans index composite spécifique)
+          // Pour l'instant, on recherche simplement.
           const result = await this.localDB.find({
             selector: {
               title: { $regex: new RegExp(this.searchQuery, 'i') },
             },
+            // Si on voulait trier, il faudrait un index composite [title, likes] ou [title, created_at]
           })
           resultDocs = result.docs as InfraDoc[]
-
-          if (this.sortByLikes) {
-            resultDocs.sort((a, b) => (b.likes || 0) - (a.likes || 0))
-          }
         } else if (this.sortByLikes) {
+          // TOP 10 des posts les plus likés
           const result = await this.localDB.find({
-            selector: { likes: { $gte: 0 } },
+            selector: {
+              likes: { $gte: 0 },
+            },
             sort: [{ likes: 'desc' }],
+            limit: 10,
           })
           resultDocs = result.docs as InfraDoc[]
         } else {
-          const result = await this.localDB.allDocs({ include_docs: true })
-          resultDocs = result.rows
-            .map((row) => row.doc as InfraDoc)
-            .filter((doc) => !doc._id?.startsWith('_design'))
-            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          // Tri par défaut : date de création décroissante
+          const result = await this.localDB.find({
+            selector: {
+              created_at: { $gt: '0' }, // Nécessaire pour utiliser l'index
+            },
+            sort: [{ created_at: 'desc' }],
+          })
+          resultDocs = result.docs as InfraDoc[]
         }
 
         this.docs = resultDocs
@@ -227,7 +235,7 @@ export default defineComponent({
         await this.localDB.put(docToUpdate)
         await this.fetchData()
       } catch (err) {
-        if ((err as any).name === 'conflict') {
+        if ((err as Error).name === 'conflict') {
           this.fetchData()
         } else {
           this.error = 'Erreur like : ' + (err as Error).message
@@ -355,6 +363,14 @@ export default defineComponent({
     },
     async submitForm() {
       await (this.isEdit ? this.updateData() : this.createData())
+    },
+
+    toggleComments(docId: string) {
+      if (this.expandedComments.includes(docId)) {
+        this.expandedComments = this.expandedComments.filter((id) => id !== docId)
+      } else {
+        this.expandedComments.push(docId)
+      }
     },
   },
 
@@ -495,10 +511,26 @@ export default defineComponent({
 
               <div class="card-comments">
                 <div class="comments-list">
-                  <div v-for="(com, idx) in doc.comments" :key="idx" class="comment-bubble">
+                  <div
+                    v-for="(com, idx) in doc.comments"
+                    :key="idx"
+                    class="comment-bubble"
+                    v-show="idx === 0 || (doc._id && expandedComments.includes(doc._id))"
+                  >
                     <span>{{ com }}</span>
                     <button @click="deleteComment(doc, idx)" class="del-com">×</button>
                   </div>
+                  <button
+                    v-if="doc.comments && doc.comments.length > 1 && doc._id"
+                    @click="toggleComments(doc._id)"
+                    class="toggle-comments-btn"
+                  >
+                    {{
+                      expandedComments.includes(doc._id)
+                        ? 'Masquer les commentaires'
+                        : `Afficher les ${doc.comments.length - 1} autres commentaires`
+                    }}
+                  </button>
                 </div>
                 <input
                   class="add-com-input"
@@ -575,6 +607,7 @@ export default defineComponent({
   font-size: 1.5rem;
   background: linear-gradient(45deg, #bb86fc, #03dac6);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 .subtitle {
@@ -851,6 +884,20 @@ textarea:focus {
   background: #1e1e1e;
   font-size: 0.9rem;
   padding: 8px;
+}
+
+.toggle-comments-btn {
+  background: none;
+  border: none;
+  color: #bb86fc;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-top: 5px;
+  padding: 0;
+  text-decoration: underline;
+}
+.toggle-comments-btn:hover {
+  color: #03dac6;
 }
 
 .card-actions {
